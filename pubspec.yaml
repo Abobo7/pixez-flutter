@@ -158,6 +158,8 @@ msix_config:
 dependency_overrides:
   wakelock_plus:
     path: ./plugins/wakelock_plus_stub
+  permission_handler_android: 13.0.1
+  sqflite_android: 2.4.0
 
 hooks:
   user_defines:

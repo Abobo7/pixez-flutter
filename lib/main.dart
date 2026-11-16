@@ -104,6 +104,9 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
+  static const MethodChannel _kitkatUiChannel =
+      MethodChannel('com.perol.dev/kitkat_ui');
+  bool? _lastStatusBarDarkIcons;
   AppLifecycleState? _appState;
 
   @override
@@ -212,6 +215,10 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                     BotToastNavigatorObserver(),
                     routeObserver,
                   ],
+                  onUnknownRoute: (settings) => MaterialPageRoute(
+                    settings: settings,
+                    builder: (_) => SplashPage(),
+                  ),
                   locale: userSetting.locale,
                   home: Builder(
                     builder: (context) {
@@ -230,6 +237,18 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                   builder: (context, child) {
                     if (Platform.isIOS)
                       child = _buildMaskBuilder(context, child);
+                    if (Platform.isAndroid) {
+                      final wantDarkIcons =
+                          Theme.of(context).brightness == Brightness.light;
+                      if (_lastStatusBarDarkIcons != wantDarkIcons) {
+                        _lastStatusBarDarkIcons = wantDarkIcons;
+                        _kitkatUiChannel
+                            .invokeMethod('setStatusBarDarkIcons', {
+                              'darkIcons': wantDarkIcons,
+                            })
+                            .catchError((_) {});
+                      }
+                    }
                     child = botToastBuilder(context, child);
                     I18n.context = context;
                     return child;

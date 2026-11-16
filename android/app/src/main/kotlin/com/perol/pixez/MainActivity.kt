@@ -1,22 +1,7 @@
-/*
- * Copyright (C) 2020. by perol_notsf, All rights reserved
- *
- * This program is free software: you can redistribute it and/or modify it under
- * the terms of the GNU General Public License as published by the Free Software
- * Foundation, either version 3 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT ANY
- * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
- * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program. If not, see <http://www.gnu.org/licenses/>.
- *
- */
-
 package com.perol.pixez
 
 import android.Manifest
+import android.annotation.TargetApi
 import android.app.Activity
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
@@ -30,13 +15,16 @@ import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.webkit.MimeTypeMap
 import android.widget.Toast
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.lifecycleScope
+import com.perol.pixez.kitkat.KitKatWindowInsetsBridge
 import com.perol.pixez.plugin.CustomTab
 import com.perol.pixez.plugin.DeepLinkPlugin
 import com.perol.pixez.plugin.JsEvalPlugin
@@ -57,7 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.*
+import java.util.Collections
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.perol.dev/save"
@@ -66,24 +54,47 @@ class MainActivity : FlutterActivity() {
     private var saveMode = 0
     private val OPEN_DOCUMENT_TREE_CODE = 190
     private val PICK_IMAGE_FILE = 2
+    private val REQ_STORAGE_PERM_CODE = 7788
     private var pendingResult: MethodChannel.Result? = null
     private var pendingPickResult: MethodChannel.Result? = null
+    private var pendingPermResult: MethodChannel.Result? = null
     private var helplessPath: String? = null
     private val SHARED_PREFERENCES_NAME = "FlutterSharedPreferences"
     private lateinit var sharedPreferences: SharedPreferences
 
+    private fun normalizeSaveMode(rawMode: Int): Int {
+        // ACTION_OPEN_DOCUMENT_TREE / DocumentsContract tree URIs require API 21+
+        return if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP && rawMode == 1) 0 else rawMode
+    }
+
+    override fun shouldHandleDeeplinking(): Boolean = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             splashScreen.setOnExitAnimationListener { splashScreenView -> splashScreenView.remove() }
         }
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+            KitKatWindowInsetsBridge.install(this, flutterEngine)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        KitKatWindowInsetsBridge.onResume()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            KitKatWindowInsetsBridge.onResume()
+        }
     }
 
     private val savingPools = Collections.synchronizedList(arrayListOf<String>())
-
-    // Saves run concurrently on Dispatchers.IO; finding or creating a SAF
-    // folder must not interleave, or the provider creates "name (1)" copies.
     private val safFolderLock = Any()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -92,7 +103,7 @@ class MainActivity : FlutterActivity() {
         sharedPreferences =
             this.getSharedPreferences(SHARED_PREFERENCES_NAME, Context.MODE_PRIVATE)
         helplessPath = sharedPreferences.getString("flutter.store_path", null)
-        saveMode = sharedPreferences.getLong("flutter.save_mode", 0).toInt()
+        saveMode = normalizeSaveMode(sharedPreferences.getLong("flutter.save_mode", 0).toInt())
         OpenSettinger.bindChannel(flutterEngine, this)
         Weiss.bindChannel(flutterEngine)
         CustomTab.bindChannel(this, flutterEngine)
@@ -106,22 +117,54 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "requestPermission" -> {
-                    if (Build.VERSION.SDK_INT >= 33) {
-                        result.success(true)
+                    when {
+                        Build.VERSION.SDK_INT >= 33 -> result.success(true)
+                        Build.VERSION.SDK_INT < Build.VERSION_CODES.M -> result.success(true)
+                        else -> {
+                            val granted = ContextCompat.checkSelfPermission(
+                                this,
+                                Manifest.permission.WRITE_EXTERNAL_STORAGE
+                            ) == PackageManager.PERMISSION_GRANTED
+                            if (granted) {
+                                result.success(true)
+                            } else {
+                                pendingPermResult = result
+                                ActivityCompat.requestPermissions(
+                                    this,
+                                    arrayOf(
+                                        Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                                        Manifest.permission.READ_EXTERNAL_STORAGE
+                                    ),
+                                    REQ_STORAGE_PERM_CODE
+                                )
+                            }
+                        }
                     }
                 }
 
                 "permissionStatus" -> {
-                    if (Build.VERSION.SDK_INT >= 33) {
-                        if (BuildConfig.IS_GOOGLEPLAY) {
-                            result.success(true)
-                            return@setMethodCallHandler
+                    when {
+                        Build.VERSION.SDK_INT >= 33 -> {
+                            if (BuildConfig.IS_GOOGLEPLAY) {
+                                result.success(true)
+                                return@setMethodCallHandler
+                            }
+                            val checkSelfPermission = ContextCompat.checkSelfPermission(
+                                this,
+                                Manifest.permission.READ_MEDIA_IMAGES
+                            )
+                            result.success(checkSelfPermission == PackageManager.PERMISSION_GRANTED)
                         }
-                        val checkSelfPermission = ContextCompat.checkSelfPermission(
-                            this,
-                            Manifest.permission.READ_MEDIA_IMAGES
-                        )
-                        result.success(checkSelfPermission == PackageManager.PERMISSION_GRANTED)
+                        Build.VERSION.SDK_INT < Build.VERSION_CODES.M -> {
+                            result.success(true)
+                        }
+                        else -> {
+                            val checkSelfPermission = ContextCompat.checkSelfPermission(
+                                this,
+                                Manifest.permission.WRITE_EXTERNAL_STORAGE
+                            )
+                            result.success(checkSelfPermission == PackageManager.PERMISSION_GRANTED)
+                        }
                     }
                 }
 
@@ -132,82 +175,52 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "data and name are required", null)
                         return@setMethodCallHandler
                     }
-                    var clearOld = call.argument<Boolean>("clear_old")
-                    saveMode = call.argument<Int>("save_mode") ?: 0
-                    if (clearOld == null)
-                        clearOld = false
-                    if (savingPools.contains(name))
-                        return@setMethodCallHandler;
+                    val clearOld = call.argument<Boolean>("clear_old") ?: false
+                    saveMode = normalizeSaveMode(call.argument<Int>("save_mode") ?: 0)
+                    if (savingPools.contains(name)) return@setMethodCallHandler
                     savingPools.add(name)
                     lifecycleScope.launch {
                         try {
                             var saved = false
                             when (saveMode) {
                                 0 -> {
-                                    val path = withContext(Dispatchers.IO) {
-                                        save(data, name)
-                                    }
+                                    val path = withContext(Dispatchers.IO) { save(data, name) }
                                     if (path != null) {
                                         saved = true
-                                        MediaScannerConnection.scanFile(
-                                            this@MainActivity,
-                                            arrayOf(path),
-                                            arrayOf(
-                                                MimeTypeMap.getSingleton()
-                                                    .getMimeTypeFromExtension(File(path).extension)
-                                            )
-                                        ) { _, _ ->
-                                        }
+                                        scanMediaFile(path)
                                     }
                                 }
 
                                 2 -> {
-                                    if (helplessPath == null) {
-                                        helplessPath =
-                                            sharedPreferences.getString("flutter.store_path", null)
-                                        if (helplessPath == null) {
-                                            helplessPath = "/storage/emulated/0/Pictures/pixez"
+                                    if (helplessPath.isNullOrEmpty()) {
+                                        helplessPath = sharedPreferences.getString("flutter.store_path", null)
+                                        if (helplessPath.isNullOrEmpty()) {
+                                            helplessPath = File(
+                                                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                                                "pixez"
+                                            ).absolutePath
                                         }
                                     }
-                                    val fullPath = "$helplessPath/$name"
-                                    val file = File(fullPath)
+                                    val file = File("$helplessPath/$name")
                                     withContext(Dispatchers.IO) {
-                                        val dirPath = file.parent
-                                        val dirFile = File(dirPath)
-                                        if (!dirFile.exists()) {
-                                            dirFile.mkdirs()
-                                        }
-                                        if (!file.exists()) {
-                                            file.createNewFile()
-                                        }
+                                        file.parentFile?.let { if (!it.exists()) it.mkdirs() }
+                                        if (!file.exists()) file.createNewFile()
                                         file.writeBytesOrDelete(data)
                                         if (clearOld && name.contains("_p0")) {
-                                            val oldFileName = name.replace("_p0", "")
-                                            val oldFile = File("$helplessPath", oldFileName)
-                                            if (oldFile.exists()) {
-                                                oldFile.delete()
-                                            }
+                                            val oldFile = File("$helplessPath", name.replace("_p0", ""))
+                                            if (oldFile.exists()) oldFile.delete()
                                         }
                                     }
-                                    MediaScannerConnection.scanFile(
-                                        this@MainActivity,
-                                        arrayOf(file.path),
-                                        arrayOf(
-                                            MimeTypeMap.getSingleton()
-                                                .getMimeTypeFromExtension(File(file.path).extension)
-                                        )
-                                    ) { _, _ ->
-                                    }
-
+                                    scanMediaFile(file.path)
                                     saved = true
                                 }
 
                                 1 -> {
-                                    withContext(Dispatchers.IO) {
-                                        val uri = writeFileUri(name, clearOld)
-                                        if (uri != null) {
-                                            wr(data, uri)
-                                            saved = true
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                                        withContext(Dispatchers.IO) {
+                                            saved = SafTreeHelper.saveBytes(this@MainActivity, safFolderLock, name, clearOld, data) {
+                                                runOnUiThread { choiceFolder() }
+                                            }
                                         }
                                     }
                                 }
@@ -229,12 +242,9 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "source_path and name are required", null)
                         return@setMethodCallHandler
                     }
-                    var clearOld = call.argument<Boolean>("clear_old")
-                    saveMode = call.argument<Int>("save_mode") ?: 0
-                    if (clearOld == null)
-                        clearOld = false
-                    if (savingPools.contains(name))
-                        return@setMethodCallHandler;
+                    val clearOld = call.argument<Boolean>("clear_old") ?: false
+                    saveMode = normalizeSaveMode(call.argument<Int>("save_mode") ?: 0)
+                    if (savingPools.contains(name)) return@setMethodCallHandler
                     savingPools.add(name)
                     lifecycleScope.launch {
                         try {
@@ -242,32 +252,24 @@ class MainActivity : FlutterActivity() {
                             var saved = false
                             when (saveMode) {
                                 0 -> {
-                                    val data = withContext(Dispatchers.IO) {
-                                        sourceFile.readBytes()
-                                    }
+                                    val data = withContext(Dispatchers.IO) { sourceFile.readBytes() }
                                     val path = save(data, name)
                                     if (path != null) {
                                         saved = true
-                                        MediaScannerConnection.scanFile(
-                                            this@MainActivity,
-                                            arrayOf(path),
-                                            arrayOf(
-                                                MimeTypeMap.getSingleton()
-                                                    .getMimeTypeFromExtension(File(path).extension)
-                                            )
-                                        ) { _, _ ->
-                                        }
+                                        scanMediaFile(path)
                                     }
                                 }
 
                                 2 -> {
+                                    if (helplessPath.isNullOrEmpty()) {
+                                        helplessPath = File(
+                                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                                            "pixez"
+                                        ).absolutePath
+                                    }
                                     val target = File("$helplessPath/$name")
                                     withContext(Dispatchers.IO) {
-                                        val dirPath = target.parent
-                                        val dirFile = File(dirPath)
-                                        if (!dirFile.exists()) {
-                                            dirFile.mkdirs()
-                                        }
+                                        target.parentFile?.let { if (!it.exists()) it.mkdirs() }
                                         try {
                                             sourceFile.copyTo(target, overwrite = true)
                                         } catch (e: Throwable) {
@@ -276,24 +278,16 @@ class MainActivity : FlutterActivity() {
                                         }
                                     }
                                     saved = true
-                                    MediaScannerConnection.scanFile(
-                                        this@MainActivity,
-                                        arrayOf(target.path),
-                                        arrayOf(
-                                            MimeTypeMap.getSingleton()
-                                                .getMimeTypeFromExtension(target.extension)
-                                        )
-                                    ) { _, _ ->
-                                    }
+                                    scanMediaFile(target.path)
                                 }
 
                                 1 -> {
-                                    withContext(Dispatchers.IO) {
-                                        val uri = writeFileUri(name, clearOld)
-                                        if (uri != null) {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                                        withContext(Dispatchers.IO) {
                                             val data = sourceFile.readBytes()
-                                            wr(data, uri)
-                                            saved = true
+                                            saved = SafTreeHelper.saveBytes(this@MainActivity, safFolderLock, name, clearOld, data) {
+                                                runOnUiThread { choiceFolder() }
+                                            }
                                         }
                                     }
                                 }
@@ -310,33 +304,28 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "get_path" -> {
-                    saveMode = call.argument<Int>("save_mode") ?: 0
+                    saveMode = normalizeSaveMode(call.argument<Int>("save_mode") ?: 0)
                     lifecycleScope.launch {
-                        val path = withContext(Dispatchers.IO) {
-                            getPath()
-                        }
+                        val path = withContext(Dispatchers.IO) { getPath() }
                         result.success(path)
                     }
                 }
 
                 "exist" -> {
                     val name = call.argument<String>("name")!!
-                    saveMode = call.argument<Int>("save_mode") ?: 0
+                    saveMode = normalizeSaveMode(call.argument<Int>("save_mode") ?: 0)
                     lifecycleScope.launch {
-                        val isFileExist = withContext(Dispatchers.IO) {
-                            try {
-                                return@withContext isFileExist(name)
-                            } catch (e: Throwable) {
-                            }
+                        val exists = withContext(Dispatchers.IO) {
+                            runCatching { isFileExist(name) }.getOrDefault(false)
                         }
-                        result.success(isFileExist)
+                        result.success(exists)
                     }
                 }
 
                 "choice_folder" -> {
-                    saveMode = call.argument<Int>("save_mode") ?: 0
-                    choiceFolder()
+                    saveMode = normalizeSaveMode(call.argument<Int>("save_mode") ?: 0)
                     pendingPickResult = result
+                    choiceFolder()
                 }
             }
         }
@@ -377,6 +366,27 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun scanMediaFile(path: String) {
+        MediaScannerConnection.scanFile(
+            this,
+            arrayOf(path),
+            arrayOf(MimeTypeMap.getSingleton().getMimeTypeFromExtension(File(path).extension))
+        ) { _, _ -> }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_STORAGE_PERM_CODE) {
+            val ok = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            pendingPermResult?.success(ok)
+            pendingPermResult = null
+        }
+    }
+
     private fun refreshAppWidgets() {
         val appWidgetManager = AppWidgetManager.getInstance(this)
         listOf(SquareAppWidget::class.java, IllustCardAppWidget::class.java).forEach { widgetClass ->
@@ -391,19 +401,14 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    override fun onActivityResult(
-        requestCode: Int, resultCode: Int,
-        data: Intent?
-    ) {
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         Safer.bindResult(this, requestCode, resultCode, data)
         when (requestCode) {
             PICK_IMAGE_FILE -> if (resultCode == Activity.RESULT_OK) {
                 data?.data?.also { uri ->
-                    Log.d("flutter.store_path", uri.toString())
                     applicationContext.contentResolver.openInputStream(uri)?.use {
-                        val dataR = it.readBytes()
-                        pendingPickResult?.success(dataR)
+                        pendingPickResult?.success(it.readBytes())
                         pendingPickResult = null
                     }
                 }
@@ -412,57 +417,37 @@ class MainActivity : FlutterActivity() {
                 pendingResult = null
             }
 
-            OPEN_DOCUMENT_TREE_CODE ->
-                if (resultCode == Activity.RESULT_OK) {
-                    data?.data?.also { uri ->
-                        Log.d("flutter.store_path", uri.toString())
-                        if (uri.toString().lowercase().contains("download")) {
-                            Toast.makeText(
-                                applicationContext,
-                                getString(R.string.do_not_choice_download_folder_message),
-                                Toast.LENGTH_LONG
-                            ).show()
-                            choiceFolder(needHint = false)
-                            return
+            OPEN_DOCUMENT_TREE_CODE -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    SafTreeHelper.handleTreeResult(
+                        this,
+                        resultCode,
+                        data,
+                        onRetry = { choiceFolder(needHint = false) },
+                        onFinish = { ok ->
+                            pendingPickResult?.success(ok)
+                            pendingPickResult = null
                         }
-                        val contentResolver = applicationContext.contentResolver
-                        val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                        contentResolver.takePersistableUriPermission(uri, takeFlags)
-                        for (i in contentResolver.persistedUriPermissions) {
-                            if (i.isReadPermission && i.isWritePermission && i.uri != uri) {
-                                contentResolver.releasePersistableUriPermission(i.uri, takeFlags)
-                            }
-                        }
-                        pendingPickResult?.success(true)
-                        pendingPickResult = null
-                    }
+                    )
                 } else {
-                    Toast.makeText(
-                        applicationContext,
-                        getString(R.string.failure_to_obtain_authorization_may_cause_some_functions_to_fail_or_crash),
-                        Toast.LENGTH_SHORT
-                    ).show()
-                    pendingPickResult?.success(false)
+                    pendingPickResult?.success(true)
                     pendingPickResult = null
                 }
+            }
         }
     }
 
     private fun getPath(): String? {
-        if (saveMode == 0) {
-            return "Pictures/PixEz"
-        }
+        if (saveMode == 0) return "Pictures/PixEz"
         if (saveMode == 2) {
             helplessPath = sharedPreferences.getString("flutter.store_path", "")
             return helplessPath
         }
-        val list =
-            contentResolver.persistedUriPermissions.takeWhile { it.isReadPermission && it.isWritePermission }
-        if (list.isEmpty()) {
-            return null
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            SafTreeHelper.getPersistedPath(this)
+        } else {
+            "Pictures/PixEz"
         }
-        return list.first().uri.toString()
     }
 
     private fun encodeGif(path: String, delay: Int, delayArray: List<Int>): String? {
@@ -470,15 +455,11 @@ class MainActivity : FlutterActivity() {
         val tempFile = File.createTempFile("encode_", ".gif", applicationContext.cacheDir)
         try {
             val listFiles = file.listFiles()
-            if (listFiles == null || listFiles.isEmpty()) {
-                throw RuntimeException("unzip files not found")
-            }
+            if (listFiles.isNullOrEmpty()) throw RuntimeException("unzip files not found")
             val arrayFile = mutableListOf<File>()
             for (i in listFiles) {
                 val ext = i.extension.lowercase()
-                if (ext == "jpg" || ext == "jpeg" || ext == "png") {
-                    arrayFile.add(i)
-                }
+                if (ext == "jpg" || ext == "jpeg" || ext == "png") arrayFile.add(i)
             }
             arrayFile.sortWith { o1, o2 -> o1.name.compareTo(o2.name) }
             val bitmap: Bitmap = BitmapFactory.decodeFile(arrayFile.first().path)
@@ -490,16 +471,14 @@ class MainActivity : FlutterActivity() {
                 GifEncoder.EncodingType.ENCODING_TYPE_STABLE_HIGH_MEMORY
             )
             for (i in arrayFile.indices) {
-                val trueDelay = if (i < delayArray.size) {
-                    delayArray[i]
-                } else {
-                    delay
-                }
+                val trueDelay = if (i < delayArray.size) delayArray[i] else delay
                 if (i != 0) {
                     val bmp = BitmapFactory.decodeFile(arrayFile[i].path)
                     encoder.encodeFrame(bmp, trueDelay)
                     bmp.recycle()
-                } else encoder.encodeFrame(bitmap, trueDelay)
+                } else {
+                    encoder.encodeFrame(bitmap, trueDelay)
+                }
             }
             encoder.close()
             bitmap.recycle()
@@ -511,153 +490,191 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun splicingUrl(parentUri: String, fileName: String) = if (parentUri.endsWith(":")) {
-        parentUri + fileName
-    } else {
-        "$parentUri/$fileName"
-    }
-
     private fun choiceFolder(needHint: Boolean = true) {
-        if (saveMode == 2 || saveMode == 0) {
+        if (saveMode == 2 || saveMode == 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
             pendingPickResult?.success(true)
+            pendingPickResult = null
             return
         }
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-        }
-        if (needHint)
-            Toast.makeText(
-                this,
-                getString(R.string.choose_a_suitable_image_storage_directory),
-                Toast.LENGTH_SHORT
-            ).show()
-        startActivityForResult(intent, OPEN_DOCUMENT_TREE_CODE)
+        SafTreeHelper.launchDocumentTree(this, OPEN_DOCUMENT_TREE_CODE, needHint)
     }
 
     private fun isFileExist(name: String): Boolean {
-        when (saveMode) {
-            0 -> {
-                return exist(name)
-            }
-
-            2 -> {
-                return File("$helplessPath/$name").exists()
-            }
-
+        return when (saveMode) {
+            0 -> exist(name)
+            2 -> File("$helplessPath/$name").exists()
             else -> {
-                val treeDocument = DocumentFile.fromTreeUri(
-                    this@MainActivity,
-                    contentResolver.persistedUriPermissions.takeWhile { it.isReadPermission && it.isWritePermission }
-                        .first().uri
-                )!!
-                if (name.contains("/")) {
-                    val names = name.split("/")
-                    if (names.size >= 2) {
-                        val treeId = DocumentsContract.getTreeDocumentId(treeDocument.uri)
-                        val folderName = names.first()
-                        val fName = names.last()
-                        val dirId = splicingUrl(treeId, folderName)
-                        val dirUri =
-                            DocumentsContract.buildDocumentUriUsingTree(treeDocument.uri, dirId)
-                        val dirDocument = DocumentFile.fromSingleUri(this, dirUri)
-                        return if (dirDocument == null || !dirDocument.exists()) {
-                            false
-                        } else if (dirDocument.isFile) {
-                            dirDocument.delete()
-                            false
-                        } else {
-                            val fileId = splicingUrl(dirId, fName)
-                            val fileUri =
-                                DocumentsContract.buildDocumentUriUsingTree(
-                                    treeDocument.uri,
-                                    fileId
-                                )
-                            val targetFile = DocumentFile.fromSingleUri(this, fileUri)
-                            targetFile != null && targetFile.exists()
-                        }
-                    } else {
-                        return false
-                    }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    SafTreeHelper.isFileExist(this, name)
+                } else {
+                    exist(name)
                 }
-                val treeId = DocumentsContract.getTreeDocumentId(treeDocument.uri)
-                val fileId = splicingUrl(treeId, name)
-                val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeDocument.uri, fileId)
-                val targetFile = DocumentFile.fromSingleUri(this, fileUri)
-                return targetFile != null && targetFile.exists()
             }
         }
     }
+}
 
-    private fun writeFileUri(fileName: String, clearOld: Boolean = false): Uri? {
-        val mimeType = if (fileName.endsWith("jpg", ignoreCase = true) || fileName.endsWith(
-                "jpeg",
-                ignoreCase = true
-            )
-        ) {
-            "image/jpg"
-        } else {
-            if (fileName.endsWith("png")) {
-                "image/png"
-            } else {
-                "image/gif"
-            }
+@TargetApi(Build.VERSION_CODES.LOLLIPOP)
+private object SafTreeHelper {
+    private fun splicingUrl(parentUri: String, fileName: String) =
+        if (parentUri.endsWith(":")) parentUri + fileName else "$parentUri/$fileName"
+
+    fun launchDocumentTree(activity: Activity, reqCode: Int, needHint: Boolean) {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
         }
-        val permissions =
-            contentResolver.persistedUriPermissions.takeWhile { it.isReadPermission && it.isWritePermission }
+        if (needHint) {
+            Toast.makeText(
+                activity,
+                activity.getString(R.string.choose_a_suitable_image_storage_directory),
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+        activity.startActivityForResult(intent, reqCode)
+    }
+
+    fun handleTreeResult(
+        activity: Activity,
+        resultCode: Int,
+        data: Intent?,
+        onRetry: () -> Unit,
+        onFinish: (Boolean) -> Unit
+    ) {
+        if (resultCode == Activity.RESULT_OK) {
+            data?.data?.also { uri ->
+                if (uri.toString().lowercase().contains("download")) {
+                    Toast.makeText(
+                        activity.applicationContext,
+                        activity.getString(R.string.do_not_choice_download_folder_message),
+                        Toast.LENGTH_LONG
+                    ).show()
+                    onRetry()
+                    return
+                }
+                val contentResolver = activity.applicationContext.contentResolver
+                val takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                contentResolver.takePersistableUriPermission(uri, takeFlags)
+                for (i in contentResolver.persistedUriPermissions) {
+                    if (i.isReadPermission && i.isWritePermission && i.uri != uri) {
+                        contentResolver.releasePersistableUriPermission(i.uri, takeFlags)
+                    }
+                }
+                onFinish(true)
+            }
+        } else {
+            Toast.makeText(
+                activity.applicationContext,
+                activity.getString(R.string.failure_to_obtain_authorization_may_cause_some_functions_to_fail_or_crash),
+                Toast.LENGTH_SHORT
+            ).show()
+            onFinish(false)
+        }
+    }
+
+    fun getPersistedPath(context: Context): String? {
+        val list = context.contentResolver.persistedUriPermissions
+            .takeWhile { it.isReadPermission && it.isWritePermission }
+        return list.firstOrNull()?.uri?.toString()
+    }
+
+    fun isFileExist(context: Context, name: String): Boolean {
+        val perm = context.contentResolver.persistedUriPermissions
+            .takeWhile { it.isReadPermission && it.isWritePermission }
+            .firstOrNull() ?: return false
+        val treeDocument = DocumentFile.fromTreeUri(context, perm.uri) ?: return false
+        val treeId = DocumentsContract.getTreeDocumentId(treeDocument.uri)
+        if (name.contains("/")) {
+            val names = name.split("/")
+            if (names.size >= 2) {
+                val folderName = names.first()
+                val fName = names.last()
+                val dirId = splicingUrl(treeId, folderName)
+                val dirUri = DocumentsContract.buildDocumentUriUsingTree(treeDocument.uri, dirId)
+                val dirDocument = DocumentFile.fromSingleUri(context, dirUri)
+                return if (dirDocument == null || !dirDocument.exists()) {
+                    false
+                } else if (dirDocument.isFile) {
+                    dirDocument.delete()
+                    false
+                } else {
+                    val fileId = splicingUrl(dirId, fName)
+                    val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeDocument.uri, fileId)
+                    val targetFile = DocumentFile.fromSingleUri(context, fileUri)
+                    targetFile != null && targetFile.exists()
+                }
+            }
+            return false
+        }
+        val fileId = splicingUrl(treeId, name)
+        val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeDocument.uri, fileId)
+        val targetFile = DocumentFile.fromSingleUri(context, fileUri)
+        return targetFile != null && targetFile.exists()
+    }
+
+    fun saveBytes(
+        context: Context,
+        safFolderLock: Any,
+        fileName: String,
+        clearOld: Boolean,
+        data: ByteArray,
+        onNeedFolder: () -> Unit
+    ): Boolean {
+        val uri = writeFileUri(context, safFolderLock, fileName, clearOld, onNeedFolder) ?: return false
+        try {
+            context.contentResolver.openOutputStream(uri, "w")?.use { it.write(data) }
+            return true
+        } catch (e: Throwable) {
+            runCatching { DocumentsContract.deleteDocument(context.contentResolver, uri) }
+            throw e
+        }
+    }
+
+    private fun writeFileUri(
+        context: Context,
+        safFolderLock: Any,
+        fileName: String,
+        clearOld: Boolean,
+        onNeedFolder: () -> Unit
+    ): Uri? {
+        val mimeType = when {
+            fileName.endsWith("jpg", ignoreCase = true) || fileName.endsWith("jpeg", ignoreCase = true) -> "image/jpg"
+            fileName.endsWith("png", ignoreCase = true) -> "image/png"
+            else -> "image/gif"
+        }
+        val permissions = context.contentResolver.persistedUriPermissions
+            .takeWhile { it.isReadPermission && it.isWritePermission }
         if (permissions.isEmpty()) {
-            choiceFolder()
+            onNeedFolder()
             return null
         }
-        val parentUri =
-            permissions
-                .first().uri
-        val treeDocument = DocumentFile.fromTreeUri(this@MainActivity, parentUri)!!
+        val treeDocument = DocumentFile.fromTreeUri(context, permissions.first().uri) ?: return null
         val treeId = DocumentsContract.getTreeDocumentId(treeDocument.uri)
-
         if (fileName.contains("/")) {
             val names = fileName.split("/")
             if (names.size >= 2) {
-                try {
+                return try {
                     var folderDocument: DocumentFile? = treeDocument
                     val fName = names.last()
                     val list = names.subList(0, names.size - 1)
                     synchronized(safFolderLock) {
-                        for (name in list) {
-                            folderDocument = folderDocument!!.findFile(name)
-                                ?: folderDocument!!.createDirectory(name)!!
+                        for (part in list) {
+                            folderDocument = folderDocument!!.findFile(part)
+                                ?: folderDocument!!.createDirectory(part)!!
                         }
                     }
-                    return folderDocument?.createFile(mimeType, fName)?.uri
-                } catch (e: Throwable) {
-                    return null
+                    folderDocument?.createFile(mimeType, fName)?.uri
+                } catch (_: Throwable) {
+                    null
                 }
             }
         }
-        if (clearOld && fileName.contains("_p0"))
-            treeDocument.findFile(fileName.replace("_p0", ""))
+        if (clearOld && fileName.contains("_p0")) {
+            treeDocument.findFile(fileName.replace("_p0", ""))?.delete()
+        }
         val fileId = splicingUrl(treeId, fileName)
         val fileUri = DocumentsContract.buildDocumentUriUsingTree(treeDocument.uri, fileId)
-        val targetFile = DocumentFile.fromSingleUri(this, fileUri)
-        if (targetFile != null) {
-            if (targetFile.exists()) {
-                targetFile.delete()
-            }
-        }
+        val targetFile = DocumentFile.fromSingleUri(context, fileUri)
+        if (targetFile != null && targetFile.exists()) targetFile.delete()
         return treeDocument.createFile(mimeType, fileName)?.uri
-    }
-
-    private fun wr(data: ByteArray, uri: Uri) {
-        try {
-            contentResolver.openOutputStream(uri, "w")?.use {
-                it.write(data)
-            }
-        } catch (e: Throwable) {
-            // Don't leave an empty document behind, e.g. when out of space.
-            try {
-                DocumentsContract.deleteDocument(contentResolver, uri)
-            } catch (_: Throwable) {
-            }
-            throw e
-        }
     }
 }

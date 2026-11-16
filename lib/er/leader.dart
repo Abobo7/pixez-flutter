@@ -18,6 +18,7 @@ import 'dart:io';
 
 import 'package:bot_toast/bot_toast.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:pixez/constants.dart';
 import 'package:pixez/er/fluent_leader.dart';
@@ -39,6 +40,28 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 class Leader {
+  static final Set<String> _consumedOAuthCodes = <String>{};
+  static bool _oauthLoginInProgress = false;
+
+  static String _formatOAuthError(Object e) {
+    if (e is DioException) {
+      final data = e.response?.data;
+      if (data is Map) {
+        final sysMsg = data['errors']?['system']?['message'];
+        final errCode = data['error'];
+        if (sysMsg != null) {
+          return 'OAuth 登录失败: $sysMsg (${errCode ?? e.response?.statusCode})';
+        }
+      } else if (data is String && data.isNotEmpty) {
+        return 'OAuth 登录失败 (${e.response?.statusCode}): $data';
+      }
+      if (e.error != null) {
+        return 'OAuth 网络异常: ${e.error}';
+      }
+    }
+    return e.toString();
+  }
+
   static Future<void> pushUntilHome(BuildContext context) async {
     if (Constants.isFluent) {
       FluentLeader.pushUntilHome(context);
@@ -138,17 +161,31 @@ class Leader {
     }
     if (link.scheme == "pixiv") {
       if (link.host.contains("account")) {
+        final String? code = link.queryParameters['code'];
+        if (code == null || code.isEmpty) {
+          return false;
+        }
+        if (_consumedOAuthCodes.contains(code) || _oauthLoginInProgress) {
+          debugPrint("[PixEz-OAuth] Ignored duplicate OAuth callback for code prefix=${code.substring(0, code.length > 6 ? 6 : code.length)}");
+          return true;
+        }
+        _oauthLoginInProgress = true;
+        _consumedOAuthCodes.add(code);
         try {
-          BotToast.showText(text: "working....");
-          String code = link.queryParameters['code']!;
+          BotToast.showText(text: "正在验证登录...");
           LPrinter.d("here we go:" + code);
+          debugPrint("[PixEz-OAuth] Exchanging authorization code (len=${code.length})...");
           Response response = await oAuthClient.code2Token(code);
+          final payload = response.data is String
+              ? jsonDecode(response.data as String)
+              : response.data;
           AccountResponse accountResponse = Account.fromJson(
-            response.data,
+            payload,
           ).response;
           final user = accountResponse.user;
           AccountProvider accountProvider = new AccountProvider();
           await accountProvider.open();
+          await accountProvider.deleteByUserId(user.id);
           var accountPersist = AccountPersist(
             userId: user.id,
             userImage: user.profileImageUrls.px170x170,
@@ -165,11 +202,29 @@ class Leader {
           );
           await accountProvider.insert(accountPersist);
           await accountStore.fetch();
-          BotToast.showText(text: "Login Success");
-          if (Platform.isIOS || Platform.isLinux) pushUntilHome(context);
+          debugPrint("[PixEz-OAuth] Login succeeded for user_id=${user.id}");
+          BotToast.showText(text: "登录成功");
+          if (Platform.isIOS || Platform.isLinux) {
+            pushUntilHome(context);
+          } else if (Navigator.of(context).canPop()) {
+            popUtilHome(context);
+          }
+          return true;
         } catch (e) {
+          // Allow retry only if network failed before server consumed code
+          if (e is DioException && e.response == null) {
+            _consumedOAuthCodes.remove(code);
+          }
+          final msg = _formatOAuthError(e);
+          debugPrint("[PixEz-OAuth] Login error: $msg | raw=$e");
           LPrinter.d(e);
-          BotToast.showText(text: e.toString());
+          BotToast.showText(
+            text: msg,
+            duration: const Duration(seconds: 5),
+          );
+          return true;
+        } finally {
+          _oauthLoginInProgress = false;
         }
       } else if (link.host.contains("illusts") ||
           link.host.contains("user") ||

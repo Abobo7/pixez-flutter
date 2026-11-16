@@ -1,0 +1,11 @@
+-keep class com.perol.pixez.PixEz { *; }
+-keep class com.perol.pixez.CrashHandler { *; }
+-keep class com.perol.pixez.MainActivity { *; }
+-keep class com.perol.pixez.kitkat.** { *; }
+-keep class androidx.multidex.** { *; }
+-keep class org.conscrypt.** { *; }
+-keep class io.flutter.app.** { *; }
+-keep class io.flutter.embedding.** { *; }
+-keep class io.flutter.util.** { *; }
+-keep class io.flutter.view.** { *; }
+-keep class io.flutter.plugin.** { *; }

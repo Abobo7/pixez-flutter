@@ -52,7 +52,15 @@ mod init_android_context {
                     );
                 }
 
-                rustls_platform_verifier::android::init_with_env(env, context)?;
+                // On Android < 7.0 (API 24), rustls-platform-verifier's Java trust manager
+                // classes (X509ExtendedTrustManager) are absent; ignore init error and clear
+                // any pending JNI exception because rhttp uses bundled Mozilla webpki roots.
+                if let Err(err) = rustls_platform_verifier::android::init_with_env(env, context) {
+                    if env.exception_check() {
+                        let _ = env.exception_clear();
+                    }
+                    log::warn!("rustls-platform-verifier init skipped (KitKat/legacy Android): {err:?}");
+                }
 
                 Ok::<(), jni::errors::Error>(())
             })

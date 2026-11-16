@@ -1342,13 +1342,13 @@ packages:
     source: hosted
     version: "13.0.2"
   permission_handler_android:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
       name: permission_handler_android
-      sha256: baf93fbf80008c240b2cf5e6d62e9495ea7727fe327444d135c44bfff9af6b6e
+      sha256: "1e3bc410ca1bf84662104b100eb126e066cb55791b7451307f9708d4007350e6"
       url: "https://pub.dev"
     source: hosted
-    version: "14.1.1"
+    version: "13.0.1"
   permission_handler_apple:
     dependency: transitive
     description:
@@ -1754,13 +1754,13 @@ packages:
     source: hosted
     version: "2.4.5"
   sqflite_android:
-    dependency: transitive
+    dependency: "direct overridden"
     description:
       name: sqflite_android
-      sha256: "3986f4cbdde19ca538aae877981c5a53400dcc4601499df18e7ed9e848a0bdd4"
+      sha256: "78f489aab276260cdd26676d2169446c7ecd3484bbd5fead4ca14f3ed4dd9ee3"
       url: "https://pub.dev"
     source: hosted
-    version: "2.4.5"
+    version: "2.4.0"
   sqflite_common:
     dependency: transitive
     description:

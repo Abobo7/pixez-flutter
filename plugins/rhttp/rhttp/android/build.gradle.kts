@@ -11,16 +11,16 @@ group = "com.flutter_rust_bridge.rhttp"
 version = "1.0-SNAPSHOT"
 
 buildscript {
-    val kotlinVersion = "2.4.0"
+    val kotlinVersion = "2.2.10"
     repositories {
         google()
         mavenCentral()
     }
 
     dependencies {
-        classpath("com.android.tools.build:gradle:9.1.0")
+        classpath("com.android.tools.build:gradle:9.3.1")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
-        classpath("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+        classpath("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
     }
 }
 
@@ -40,11 +40,11 @@ apply(plugin = "org.jetbrains.kotlin.android")
 android {
     namespace = "com.flutter_rust_bridge.rhttp"
 
-    compileSdk = 37
+    compileSdk = 35
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
     }
 
     sourceSets {
@@ -57,47 +57,38 @@ android {
     }
 
     defaultConfig {
-        minSdk = 24
+        minSdk = 19
     }
 }
 
 project.extensions.configure(org.jetbrains.kotlin.gradle.dsl.KotlinAndroidProjectExtension::class.java) {
     compilerOptions {
-        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+        jvmTarget.set(JvmTarget.JVM_1_8)
     }
 }
 
 fun findCargo(): String {
     val isWindows = System.getProperty("os.name").lowercase().contains("win")
     val exe = if (isWindows) "cargo.exe" else "cargo"
-
     val home = System.getProperty("user.home")
-
     val candidates = mutableListOf<String>()
 
-    // Check if cargo is resolvable from the PATH (normally this should work, but there are edge
-    // cases, in which the fallbacks below may need to be used).
     if (isCargo("cargo")) {
         return "cargo"
     }
 
-    // 1. CARGO_HOME
     val cargoHome = System.getenv("CARGO_HOME")
     if (cargoHome != null) {
         candidates += "$cargoHome/bin/$exe"
     }
-
-    // 2. Default cargo home
     candidates += "$home/.cargo/bin/$exe"
-
-    // 3. Common installation locations
+    candidates += "D:/Software/scoop/apps/rustup/current/.cargo/bin/$exe"
     candidates += listOf(
-        "/opt/homebrew/bin/cargo",   // macOS (Apple Silicon)
-        "/usr/local/bin/cargo",      // macOS (Intel) / Linux
-        "/usr/bin/cargo",            // Linux
+        "/opt/homebrew/bin/cargo",
+        "/usr/local/bin/cargo",
+        "/usr/bin/cargo",
     )
 
-    // 4. Check candidates
     candidates.firstOrNull { File(it).exists() }?.let {
         if (File(it).canExecute() && isCargo(it)) {
             return it
@@ -146,12 +137,8 @@ fun isCargo(executable: String): Boolean {
             commandLine(executable, "--version")
             isIgnoreExitValue = true
         }
-
-        val exitOk = result.result.get().exitValue == 0
-        val output = result.standardOutput.asText.get()
-
-        exitOk && output.contains("cargo")
-    } catch (e: Exception) {
+        result.result.get().exitValue == 0
+    } catch (_: Throwable) {
         false
     }
 }

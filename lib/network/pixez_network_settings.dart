@@ -16,7 +16,11 @@ class PixezNetworkSettings {
     if (mode == NetworkMode.ech) {
       return r.ClientSettings(
         enableEch: true,
-        requireEch: true,
+        requireEch: false,
+        timeoutSettings: const r.TimeoutSettings(
+          connectTimeout: Duration(seconds: 6),
+          timeout: Duration(seconds: 15),
+        ),
         tlsSettings: r.TlsSettings(
           verifyCertificates: true,
           rootCertSource: r.RootCertSource.webpki,

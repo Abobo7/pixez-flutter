@@ -17,6 +17,7 @@
 import 'dart:io';
 
 import 'package:bot_toast/bot_toast.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:pixez/custom_tab_plugin.dart';
 import 'package:pixez/er/leader.dart';
@@ -179,6 +180,19 @@ class _LoginPageState extends State<LoginPage> {
         BotToast.showText(text: e.toString());
       }
       return;
+    }
+    if (Platform.isAndroid) {
+      try {
+        final androidInfo = await DeviceInfoPlugin().androidInfo;
+        if (androidInfo.version.sdkInt < 21) {
+          BotToast.showText(
+            text: "Android 4.4 已为您调用外部现代浏览器登录；若未自动跳回，复制 pixiv:// 回调链接到 Token 页提交即可",
+            duration: const Duration(seconds: 5),
+          );
+          await CustomTabPlugin.launch(url);
+          return;
+        }
+      } catch (_) {}
     }
     if (userSetting.oauthNetworkMode.usesCompatibleConnection) {
       // await WeissServer.listener();

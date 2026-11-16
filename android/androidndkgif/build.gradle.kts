@@ -4,12 +4,13 @@ plugins {
 
 android {
     namespace = "com.waynejo.androidndkgif"
-    compileSdk = 37
+    compileSdk = 35
+    ndkVersion = "25.2.9519653"
 
     defaultConfig {
-        minSdk = 21
+        minSdk = 19
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
+            abiFilters += listOf("armeabi-v7a")
         }
     }
 
@@ -31,10 +32,9 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
     }
-
 }
 
 dependencies {

@@ -19,9 +19,12 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:pixez/constants.dart';
 import 'package:pixez/er/lprinter.dart';
+import 'package:pixez/er/prefer.dart';
 
 //虽然官方有提供包能一键生成，但是少一个依赖更好 :)
 class CryptoPlugin {
+  static const String _verifierPrefKey = 'oauth_pkce_code_verifier';
+
   static Future<String> getCodeVer() async {
     const String randomKeySet =
         'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
@@ -29,15 +32,35 @@ class CryptoPlugin {
             (i) => randomKeySet[Random.secure().nextInt(randomKeySet.length)])
         .join();
     Constants.code_verifier = result;
-    return Constants.code_verifier!;
+    try {
+      final prefs = await Prefer.getInstance();
+      await prefs.setString(_verifierPrefKey, result);
+    } catch (_) {}
+    return result;
+  }
+
+  static Future<String?> loadCodeVer() async {
+    final inMemory = Constants.code_verifier;
+    if (inMemory != null && inMemory.isNotEmpty) {
+      return inMemory;
+    }
+    try {
+      final prefs = await Prefer.getInstance();
+      final persisted = prefs.getString(_verifierPrefKey);
+      if (persisted != null && persisted.isNotEmpty) {
+        Constants.code_verifier = persisted;
+        return persisted;
+      }
+    } catch (_) {}
+    return null;
   }
 
   static Future<String> getCodeChallenge() async {
-    LPrinter.d(Constants.code_verifier);
+    final verifier = await loadCodeVer() ?? await getCodeVer();
+    LPrinter.d(verifier);
     final codeChallenge = base64Url
-        .encode(sha256.convert(ascii.encode(Constants.code_verifier!)).bytes)
+        .encode(sha256.convert(ascii.encode(verifier)).bytes)
         .replaceAll('=', '');
     return codeChallenge;
   }
 }
- 

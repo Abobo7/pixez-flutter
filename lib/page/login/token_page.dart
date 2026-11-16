@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:material_ui/material_ui.dart';
 import 'package:pixez/er/leader.dart';
 import 'package:pixez/i18n.dart';
@@ -20,15 +21,39 @@ class _TokenPageState extends State<TokenPage> {
     super.dispose();
   }
 
+  String? _extractAuthCode(String input) {
+    final trimmed = input.trim();
+    if (trimmed.startsWith('pixiv://') || trimmed.contains('code=')) {
+      final uri = Uri.tryParse(trimmed);
+      if (uri != null && uri.queryParameters['code']?.isNotEmpty == true) {
+        return uri.queryParameters['code'];
+      }
+      final match = RegExp(r'[?&]code=([^&#\s]+)').firstMatch(trimmed);
+      if (match != null) {
+        return Uri.decodeComponent(match.group(1)!);
+      }
+      if (trimmed.startsWith('code=')) {
+        return Uri.decodeComponent(trimmed.substring(5));
+      }
+    }
+    return null;
+  }
+
   Future<void> _submit() async {
     if (userNameController.text.isEmpty) return;
     try {
-      String token = userNameController.text.toString();
-      var response1 = await oAuthClient.postRefreshAuthToken(
-        refreshToken: token,
-      );
+      String token = userNameController.text.trim();
+      final authCode = _extractAuthCode(token);
+      var response1 = authCode != null
+          ? await oAuthClient.code2Token(authCode)
+          : await oAuthClient.postRefreshAuthToken(
+              refreshToken: token,
+            );
+      final payload = response1.data is String
+          ? jsonDecode(response1.data as String)
+          : response1.data;
       AccountResponse accountResponse = Account.fromJson(
-        response1.data,
+        payload,
       ).response;
       final user = accountResponse.user;
       AccountProvider accountProvider = new AccountProvider();
@@ -69,7 +94,9 @@ class _TokenPageState extends State<TokenPage> {
           TextFormField(
             maxLines: 1,
             autofocus: true,
-            decoration: const InputDecoration(hintText: 'Pixiv token'),
+            decoration: const InputDecoration(
+              hintText: 'Pixiv refresh_token 或 pixiv://...code=',
+            ),
             controller: userNameController,
             autofillHints: [AutofillHints.username],
             onFieldSubmitted: (_) => _submit(),

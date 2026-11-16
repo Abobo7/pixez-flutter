@@ -22,7 +22,9 @@ use std::time::{Duration as StdDuration, Instant};
 use tokio::sync::RwLock;
 pub use tokio_util::sync::CancellationToken;
 
+const CLOUDFLARE_DOH_ENDPOINT: &str = "https://cloudflare-dns.com/dns-query";
 const ALIDNS_RESOLVE_ENDPOINT: &str = "https://223.5.5.5/resolve";
+const ALIDNS_BACKUP_ENDPOINT: &str = "https://223.6.6.6/resolve";
 const ECH_BOOTSTRAP_HOST: &str = "cloudflare-ech.com";
 
 #[derive(Clone)]
@@ -424,10 +426,11 @@ fn apply_reqwest_tls_settings(
 
     match tls_settings.root_cert_source {
         RootCertSource::Platform => {
-            // Add custom certs if not empty, otherwise keep platform verifier as is.
-            if !custom_certs.is_empty() {
-                client = client.tls_certs_merge(custom_certs);
-            }
+            // On Android < 7.0 (KitKat API 19), fall back to bundled webpki roots
+            // alongside any caller-supplied certificates so TLS 1.3 always works.
+            let mut certs = custom_certs;
+            certs.extend(webpki_root_certs()?);
+            client = client.tls_certs_only(certs);
         }
         RootCertSource::Webpki => {
             let mut certs = custom_certs;
@@ -550,12 +553,12 @@ fn build_ech_tls_config(
             }
         }
         _ => {
-            let verifier = rustls_platform_verifier::Verifier::new(provider.clone())
-                .map_err(|e| RhttpError::RhttpUnknownError(format!("{e:?}")))?;
-
-            config_builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(verifier))
+            match rustls_platform_verifier::Verifier::new(provider.clone()) {
+                Ok(verifier) => config_builder
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(verifier)),
+                Err(_) => config_builder.with_root_certificates(build_root_store(true, &[])?),
+            }
         }
     };
 
@@ -752,27 +755,42 @@ impl Resolve for DynamicResolver {
 }
 
 struct EchTransport {
-    ech_endpoint: Url,
+    ech_endpoints: Vec<(Url, &'static str)>,
     client: reqwest::Client,
 }
 
 impl EchTransport {
     fn new() -> Result<Self, RhttpError> {
-        let ech_endpoint = Url::parse(ALIDNS_RESOLVE_ENDPOINT)
+        let cf_url = Url::parse(CLOUDFLARE_DOH_ENDPOINT)
             .map_err(|e| RhttpError::RhttpUnknownError(e.to_string()))?;
+        let ali_primary = Url::parse(ALIDNS_RESOLVE_ENDPOINT)
+            .map_err(|e| RhttpError::RhttpUnknownError(e.to_string()))?;
+        let ali_backup = Url::parse(ALIDNS_BACKUP_ENDPOINT)
+            .map_err(|e| RhttpError::RhttpUnknownError(e.to_string()))?;
+
+        let cf_addrs = [
+            SocketAddr::from(([104, 16, 248, 249], 443)),
+            SocketAddr::from(([104, 16, 249, 249], 443)),
+        ];
+
         let client = reqwest::Client::builder()
             .no_proxy()
+            .connect_timeout(StdDuration::from_secs(3))
+            .timeout(StdDuration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs("cloudflare-dns.com", &cf_addrs)
             // Use the bundled Mozilla (webpki) roots instead of the platform
-            // verifier. AliDNS is signed by a public CA in that bundle, and this
-            // avoids depending on the Android JNI platform-verifier init, which
-            // is why the bootstrap query failed on Android but not iOS.
+            // verifier so DoH bootstrap works on Android 4.4+ without API 24+.
             .tls_certs_only(webpki_root_certs()?)
             .build()
             .map_err(|e| RhttpError::RhttpUnknownError(e.to_string()))?;
 
         Ok(Self {
-            ech_endpoint,
+            ech_endpoints: vec![
+                (cf_url, "application/dns-json"),
+                (ali_primary, "application/json"),
+                (ali_backup, "application/json"),
+            ],
             client,
         })
     }
@@ -780,24 +798,45 @@ impl EchTransport {
     async fn lookup_ech_config(&self, _host: &str) -> Result<EchLookupResult, RhttpError> {
         // pixiv's ECH front is served via cloudflare-ech.com; resolve the ECH
         // config from that bootstrap host regardless of the requested host.
-        let parsed = self.lookup_alidns_https_ech(ECH_BOOTSTRAP_HOST).await?;
+        let parsed = self.lookup_doh_https_ech(ECH_BOOTSTRAP_HOST).await?;
         Ok(EchLookupResult {
             ech_config: Some(parsed.ech),
             ttl: parsed.ttl,
         })
     }
 
-    async fn lookup_alidns_https_ech(&self, host: &str) -> Result<ParsedAliDnsHttpsEch, RhttpError> {
+    async fn lookup_doh_https_ech(&self, host: &str) -> Result<ParsedAliDnsHttpsEch, RhttpError> {
+        let mut last_err: Option<RhttpError> = None;
+        for (endpoint, accept_mime) in &self.ech_endpoints {
+            match self
+                .lookup_single_doh_https_ech(endpoint, *accept_mime, host)
+                .await
+            {
+                Ok(parsed) => return Ok(parsed),
+                Err(err) => last_err = Some(err),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            RhttpError::RhttpUnknownError("No DoH ECH endpoints configured".to_string())
+        }))
+    }
+
+    async fn lookup_single_doh_https_ech(
+        &self,
+        endpoint: &Url,
+        accept_mime: &str,
+        host: &str,
+    ) -> Result<ParsedAliDnsHttpsEch, RhttpError> {
         let response = self
             .client
-            .get(self.ech_endpoint.clone())
+            .get(endpoint.clone())
             .query(&[("name", host), ("type", "HTTPS")])
-            .header("accept", "application/json")
+            .header("accept", accept_mime)
             .send()
             .await
             .map_err(|e| {
                 RhttpError::RhttpUnknownError(format!(
-                    "AliDNS ECH request failed: {}",
+                    "DoH ECH request ({endpoint}) failed: {}",
                     full_error_chain(&e)
                 ))
             })?;
@@ -805,12 +844,12 @@ impl EchTransport {
         let status = response.status();
         if !status.is_success() {
             return Err(RhttpError::RhttpUnknownError(format!(
-                "AliDNS ECH query failed with status {status}"
+                "DoH ECH query ({endpoint}) failed with status {status}"
             )));
         }
 
         let body = response.bytes().await.map_err(|e| {
-            RhttpError::RhttpUnknownError(format!("AliDNS ECH body read failed: {e}"))
+            RhttpError::RhttpUnknownError(format!("DoH ECH body read failed: {e}"))
         })?;
 
         parse_alidns_https_ech_response(body.as_ref())
@@ -876,11 +915,22 @@ fn parse_alidns_https_ech_response(body: &[u8]) -> Result<ParsedAliDnsHttpsEch, 
 }
 
 fn extract_https_svc_param<'a>(data: &'a str, key: &str) -> Option<&'a str> {
-    let prefix = format!("{key}=\"");
-    let start = data.find(prefix.as_str())? + prefix.len();
-    let tail = &data[start..];
-    let end = tail.find('"')?;
-    Some(&tail[..end])
+    let quoted_prefix = format!("{key}=\"");
+    if let Some(pos) = data.find(quoted_prefix.as_str()) {
+        let tail = &data[pos + quoted_prefix.len()..];
+        let end = tail.find('"')?;
+        return Some(&tail[..end]);
+    }
+    let unquoted_prefix = format!("{key}=");
+    let pos = data.find(unquoted_prefix.as_str())?;
+    let tail = &data[pos + unquoted_prefix.len()..];
+    let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+    let val = tail[..end].trim_matches('"');
+    if val.is_empty() {
+        None
+    } else {
+        Some(val)
+    }
 }
 
 #[derive(Debug)]

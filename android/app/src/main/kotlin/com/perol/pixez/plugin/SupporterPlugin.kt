@@ -18,7 +18,11 @@ class SupporterPlugin {
                 when (call.method) {
                     "exit" -> {
                         result.success(true)
-                        finishAndRemoveTask()
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                            finishAndRemoveTask()
+                        } else {
+                            finish()
+                        }
                     }
 
                     "process_text" -> {

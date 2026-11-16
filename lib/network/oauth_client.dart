@@ -14,6 +14,7 @@
  *
  */
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:core';
 import 'dart:io';
@@ -23,9 +24,11 @@ import 'package:dio/dio.dart';
 import 'package:dio_compatibility_layer/dio_compatibility_layer.dart';
 import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
-import 'package:pixez/constants.dart';
 import 'package:pixez/crypto_plugin.dart';
+import 'package:pixez/er/hoster.dart';
+import 'package:pixez/er/prefer.dart';
 import 'package:pixez/main.dart';
+import 'package:pixez/network/network_mode.dart';
 import 'package:pixez/network/pixez_network_settings.dart';
 import 'package:rhttp/rhttp.dart' as r;
 
@@ -36,6 +39,8 @@ class OAuthClient {
       "28c1fdd170a5204386cb1313c7077b34f83e4aaf4aa829ce78c231e05b0bae2c";
 
   late Dio httpClient;
+  bool _adapterInitialized = false;
+  Future<Dio>? _creatingClientFuture;
 
   static const BASE_OAUTH_URL_HOST = "oauth.secure.pixiv.net";
 
@@ -46,14 +51,33 @@ class OAuthClient {
       "W9JZoJe00qPvJsiyCGT3CCtC6ZUtdpKpzMbNlUGP"; //这换行绝了
 
   String getIsoDate() {
-    DateTime dateTime = new DateTime.now();
-    DateFormat dateFormat = new DateFormat("yyyy-MM-dd'T'HH:mm:ss'+00:00'");
+    DateTime dateTime = DateTime.now().toUtc();
+    DateFormat dateFormat = DateFormat("yyyy-MM-dd'T'HH:mm:ss'+00:00'");
     return dateFormat.format(dateTime);
   }
 
   static final String AUTHORIZATION = "Authorization";
 
-  Future<Dio> createDioClient() async {
+  void _refreshClientSignatureHeaders(Map<String, dynamic> headers) {
+    final String time = getIsoDate();
+    headers["X-Client-Time"] = time;
+    headers["X-Client-Hash"] = getHash(time + hashSalt);
+  }
+
+  Future<Dio> createDioClient() {
+    final inflight = _creatingClientFuture;
+    if (inflight != null) return inflight;
+    final future = _createDioClientInternal();
+    _creatingClientFuture = future;
+    future.whenComplete(() {
+      if (identical(_creatingClientFuture, future)) {
+        _creatingClientFuture = null;
+      }
+    });
+    return future;
+  }
+
+  Future<Dio> _createDioClientInternal() async {
     final compatibleClient = await r.RhttpCompatibleClient.create(
       settings: PixezNetworkSettings.forHost(
         BASE_OAUTH_URL_HOST,
@@ -61,6 +85,7 @@ class OAuthClient {
       ),
     );
     httpClient.httpClientAdapter = ConversionLayerAdapter(compatibleClient);
+    _adapterInitialized = true;
     if (Platform.isAndroid) {
       try {
         DeviceInfoPlugin deviceInfo = DeviceInfoPlugin();
@@ -72,6 +97,106 @@ class OAuthClient {
       } catch (e) {}
     }
     return httpClient;
+  }
+
+  Future<void> _ensureReady() async {
+    try {
+      await Prefer.getInstance();
+    } catch (_) {}
+    if (!_adapterInitialized) {
+      await createDioClient();
+    }
+    httpClient.options.baseUrl = 'https://$BASE_OAUTH_URL_HOST';
+    _refreshClientSignatureHeaders(httpClient.options.headers);
+  }
+
+  Future<Response> _postFormWithFallback(
+    String path,
+    Map<String, dynamic> data,
+  ) async {
+    await _ensureReady();
+    if (Platform.isAndroid) {
+      // Allow MIUI PowerKeeper / firewall rules to unblock app UID on browser -> app resume
+      await Future.delayed(const Duration(milliseconds: 250));
+      _refreshClientSignatureHeaders(httpClient.options.headers);
+    }
+    try {
+      return await httpClient
+          .post(
+            path,
+            data: data,
+            options: Options(contentType: Headers.formUrlEncodedContentType),
+          )
+          .timeout(const Duration(seconds: 6));
+    } catch (e) {
+      // HTTP status responses (e.g. 400 invalid_request) reached Pixiv; do not replay single-use codes
+      if (e is DioException && e.response != null) rethrow;
+      if (e is! DioException && e is! TimeoutException) rethrow;
+
+      if (userSetting.oauthNetworkMode != NetworkMode.standard) {
+        // Fallback to standard TLS 1.3 (via system VPN / proxy) when ECH bootstrap stalls or is unreachable
+        try {
+          final fallbackHeaders = Map<String, dynamic>.from(
+            httpClient.options.headers,
+          );
+          _refreshClientSignatureHeaders(fallbackHeaders);
+          final fallbackDio = Dio(
+            BaseOptions(
+              baseUrl: 'https://$BASE_OAUTH_URL_HOST',
+              headers: fallbackHeaders,
+              contentType: Headers.formUrlEncodedContentType,
+            ),
+          );
+          final stdClient = await r.RhttpCompatibleClient.create(
+            settings: r.ClientSettings(
+              timeoutSettings: const r.TimeoutSettings(
+                connectTimeout: Duration(seconds: 6),
+                timeout: Duration(seconds: 12),
+              ),
+              tlsSettings: const r.TlsSettings(
+                verifyCertificates: true,
+                rootCertSource: r.RootCertSource.webpki,
+                sni: true,
+              ),
+              dnsSettings: r.DnsSettings.static(
+                overrides: {
+                  BASE_OAUTH_URL_HOST: [
+                    Hoster.oauth(),
+                    '210.140.139.155',
+                    '104.18.10.118',
+                  ],
+                },
+              ),
+            ),
+          );
+          fallbackDio.httpClientAdapter = ConversionLayerAdapter(stdClient);
+          return await fallbackDio
+              .post(
+                path,
+                data: data,
+                options: Options(
+                  contentType: Headers.formUrlEncodedContentType,
+                ),
+              )
+              .timeout(const Duration(seconds: 10));
+        } catch (fallbackErr) {
+          if (fallbackErr is DioException && fallbackErr.response != null) {
+            rethrow;
+          }
+        }
+      }
+
+      // Final retry on primary client
+      await Future.delayed(const Duration(milliseconds: 400));
+      _refreshClientSignatureHeaders(httpClient.options.headers);
+      return await httpClient
+          .post(
+            path,
+            data: data,
+            options: Options(contentType: Headers.formUrlEncodedContentType),
+          )
+          .timeout(const Duration(seconds: 10));
+    }
   }
 
   OAuthClient() {
@@ -103,7 +228,7 @@ class OAuthClient {
   }
 
   static String getHash(String string) {
-    var content = new Utf8Encoder().convert(string);
+    var content = Utf8Encoder().convert(string);
     var digest = md5.convert(content);
     return digest.toString();
   }
@@ -113,9 +238,9 @@ class OAuthClient {
     String passWord, {
     String deviceToken = "pixiv",
   }) {
-    return httpClient.post(
+    return _postFormWithFallback(
       "/auth/token",
-      data: {
+      {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "grant_type": "password",
@@ -128,20 +253,23 @@ class OAuthClient {
     );
   }
 
-  Future<Response> code2Token(String code) {
-    return httpClient.post(
+  Future<Response> code2Token(String code) async {
+    final verifier = await CryptoPlugin.loadCodeVer();
+    if (verifier == null || verifier.isEmpty) {
+      throw StateError('未找到登录校验码 (code_verifier)，请点击“登录”按钮重新发起浏览器授权');
+    }
+    return _postFormWithFallback(
       "/auth/token",
-      data: {
+      {
         "code": code,
         "redirect_uri":
             "https://app-api.pixiv.net/web/v1/users/auth/pixiv/callback",
         "grant_type": "authorization_code",
         "include_policy": true,
         "client_id": CLIENT_ID,
-        "code_verifier": Constants.code_verifier,
+        "code_verifier": verifier,
         "client_secret": CLIENT_SECRET,
       },
-      options: Options(contentType: Headers.formUrlEncodedContentType),
     );
   }
 
@@ -162,9 +290,9 @@ class OAuthClient {
     refreshToken = String,
     deviceToken = String,
   }) {
-    return httpClient.post(
+    return _postFormWithFallback(
       "/auth/token",
-      data: {
+      {
         "client_id": CLIENT_ID,
         "client_secret": CLIENT_SECRET,
         "grant_type": "refresh_token",

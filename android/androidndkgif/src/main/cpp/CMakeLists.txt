@@ -20,17 +20,43 @@ add_library(androidndkgif SHARED
    BaseGifEncoder.cpp
 )
 
-target_compile_definitions(androidndkgif PRIVATE
-   __GXX_EXPERIMENTAL_CXX0X__
-   __ANDROID_USE_LARGE_PAGES__
+add_library(jnicompat19 SHARED
+   kitkat_bionic_compat.c
 )
 
-target_link_options(androidndkgif PRIVATE
-   "LINKER:-z,max-page-size=16384"
-   "LINKER:-z,common-page-size=16384"
+target_compile_definitions(androidndkgif PRIVATE
+   __GXX_EXPERIMENTAL_CXX0X__
 )
+
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+   target_compile_definitions(androidndkgif PRIVATE __ANDROID_USE_LARGE_PAGES__)
+   target_link_options(androidndkgif PRIVATE
+      "LINKER:--hash-style=both"
+      "LINKER:-z,max-page-size=16384"
+      "LINKER:-z,common-page-size=16384"
+   )
+   target_link_options(jnicompat19 PRIVATE
+      "LINKER:--hash-style=both"
+      "LINKER:-z,max-page-size=16384"
+      "LINKER:-z,common-page-size=16384"
+   )
+else()
+   target_link_options(androidndkgif PRIVATE
+      "LINKER:--hash-style=both"
+   )
+   target_link_options(jnicompat19 PRIVATE
+      "LINKER:--hash-style=both"
+   )
+endif()
 
 target_link_libraries(androidndkgif
    jnigraphics
    log
+)
+
+target_link_libraries(jnicompat19
+   dl
+   log
+   m
+   c
 )

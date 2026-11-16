@@ -116,3 +116,4 @@ msic
 *.pfx
 
 /lib/src/generated/
+/dist/
